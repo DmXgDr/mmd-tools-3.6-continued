@@ -63,12 +63,8 @@ class VPDImporter:
             elif reset_transform:
                 bone.matrix_basis.identity()
 
-        if armObj.pose_library is None:
-            armObj.pose_library = bpy.data.actions.new(name='PoseLib')
-
-        frames = [m.frame for m in armObj.pose_library.pose_markers]
-        frame_max = max(frames) if len(frames) else 0
-        bpy.ops.poselib.pose_add(frame=frame_max+1, name=self.__pose_name)
+        from mmd_tools.core.pose_library import store_pose
+        store_pose(armObj, self.__pose_name, pose_data)
 
 
     def __assignToMesh(self, meshObj):

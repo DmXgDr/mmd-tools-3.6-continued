@@ -989,6 +989,24 @@ class ExportVmd(Operator, ExportHelper, PreferencesMixin):
     def cancel(self, context):
         self.restore_preferences_on_cancel()
 
+_vpd_pose_items_cache = {}
+
+
+def _vpd_export_armature(context):
+    obj = context.active_object
+    root = mmd_model.Model.findRoot(obj)
+    return mmd_model.Model(root).armature() if root else (obj if obj and obj.type == 'ARMATURE' else None)
+
+
+def _vpd_pose_items(self, context):
+    from ..core.pose_library import get_library
+    library = get_library(_vpd_export_armature(context)) if context else None
+    items = [('-1', '姿态库当前选中项', '使用姿态库中的活动姿态')]
+    if library:
+        items += [(str(i), marker.name, '第 %d 帧' % marker.frame) for i, marker in enumerate(library.pose_markers)]
+    return _vpd_pose_items_cache.setdefault(tuple(items), items)
+
+
 class ExportVpd(Operator, ExportHelper, PreferencesMixin):
     bl_idname = 'mmd_tools.export_vpd'
     bl_label = 'Export VPD File (.vpd)'
@@ -1014,6 +1032,7 @@ class ExportVpd(Operator, ExportHelper, PreferencesMixin):
             ],
         default='CURRENT',
         )
+    pose_index: bpy.props.EnumProperty(name='导出姿态', items=_vpd_pose_items, options={'SKIP_SAVE'})
     use_pose_mode: bpy.props.BoolProperty(
         name='Treat Current Pose as Rest Pose',
         description='You can pose the model to export a pose data to different pose base, such as T-Pose or A-Pose',
@@ -1040,12 +1059,18 @@ class ExportVpd(Operator, ExportHelper, PreferencesMixin):
         layout.prop(self, 'pose_type', expand=True)
         if self.pose_type != 'CURRENT':
             layout.prop(self, 'use_pose_mode')
+            armature = _vpd_export_armature(context)
+            if armature:
+                layout.prop(armature, 'mmd_pose_library')
+            if self.pose_type == 'ACTIVE':
+                layout.prop(self, 'pose_index')
 
     def execute(self, context):
         params = {
             'filepath':self.filepath,
             'scale':self.scale,
             'pose_type':self.pose_type,
+            'pose_index':int(self.pose_index or '-1'),
             'use_pose_mode':self.use_pose_mode,
             }
 
@@ -1068,6 +1093,7 @@ class ExportVpd(Operator, ExportHelper, PreferencesMixin):
             err_msg = traceback.format_exc()
             logging.error(err_msg)
             self.report({'ERROR'}, err_msg)
+            return {'CANCELLED'}
         return {'FINISHED'}
 
     def invoke(self, context, event):

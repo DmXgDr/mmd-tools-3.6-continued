@@ -135,7 +135,8 @@ class FnMorph(object):
     @staticmethod
     def overwrite_bone_morphs_from_pose_library(armature_object):
         armature = armature_object.id_data
-        pose_library = armature.pose_library
+        from mmd_tools.core.pose_library import get_library, apply_pose
+        pose_library = get_library(armature)
 
         if pose_library is None:
             return
@@ -145,24 +146,29 @@ class FnMorph(object):
         bone_morphs = mmd_root.bone_morphs
 
         original_mode = bpy.context.object.mode
-        bpy.ops.object.mode_set(mode='POSE')
+        backup = {b: (b.matrix_basis.copy(), b.rotation_mode, b.bone.select) for b in armature.pose.bones}
+        auto_key = bpy.context.scene.tool_settings.use_keyframe_insert_auto
+        bpy.context.scene.tool_settings.use_keyframe_insert_auto = False
         try:
-            for index, pose_maker in enumerate(pose_library.pose_markers):
-                bone_morph = next(iter([m for m in bone_morphs if m.name == pose_maker.name]), None)
-                if bone_morph is None:
-                    bone_morph = bone_morphs.add()
-                    bone_morph.name = pose_maker.name
-
-                bpy.ops.pose.select_all(action='SELECT')
-                bpy.ops.pose.transforms_clear()
-                bpy.ops.poselib.apply_pose(pose_index=index)
-
-                mmd_root.active_morph = bone_morphs.find(bone_morph.name)
-                bpy.ops.mmd_tools.apply_bone_morph()
-
-            bpy.ops.pose.transforms_clear()
-
+            with bpyutils.select_object(armature):
+                bpy.ops.object.mode_set(mode='POSE')
+                for index, pose_maker in enumerate(pose_library.pose_markers):
+                    bone_morph = next(iter([m for m in bone_morphs if m.name == pose_maker.name]), None)
+                    if bone_morph is None:
+                        bone_morph = bone_morphs.add()
+                        bone_morph.name = pose_maker.name
+                    for bone in armature.pose.bones:
+                        bone.matrix_basis.identity()
+                        bone.bone.select = True
+                    apply_pose(armature, pose_library, index)
+                    mmd_root.active_morph = bone_morphs.find(bone_morph.name)
+                    bpy.ops.mmd_tools.apply_bone_morph()
         finally:
+            for bone, (matrix, mode, selected) in backup.items():
+                bone.rotation_mode = mode
+                bone.matrix_basis = matrix
+                bone.bone.select = selected
+            bpy.context.scene.tool_settings.use_keyframe_insert_auto = auto_key
             bpy.ops.object.mode_set(mode=original_mode)
 
     @staticmethod

@@ -23,6 +23,7 @@
 | 根对象旧动画清理、共享数据保护、自动插帧恢复 | `core/vmd/import_options.py` |
 | 动作同目录音频查找、歧义跳过、显式新增/替换、失败回退 | `audio_transfer.py`、`operators/fileio.py` |
 | 物理创建性能优化及常规路径开关 | `core/model.py`、`core/pmx/importer.py`、`operators/fileio.py` |
+| Blender 3.6 VPD 独立姿态库、姿态导出及骨骼表情转换兼容修复（本分支实现） | `core/pose_library.py`、`core/vpd/`、`core/morph.py`、`operators/fileio.py` |
 | 恒定区间 VMD 导出冗余补帧修复 | `core/vmd/exporter.py` |
 | Windows 拖放接收、会话设置、偏好开关及生命周期管理 | `drag_drop/__init__.py`、`drag_drop/win_drop.py`、`preferences.py` |
 | 公开版默认预设保存与旧个人选择隔离 | `preset_store.py`、`preferences.py` |

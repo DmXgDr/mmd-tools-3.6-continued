@@ -35,6 +35,7 @@ __properties = {
             ]
         ),
         'mmd_root': bpy.props.PointerProperty(type=MMDRoot),
+        'mmd_pose_library': bpy.props.PointerProperty(type=bpy.types.Action, name='MMD 姿态库', description='保存 VPD 姿态，不替换角色当前动画'),
         'mmd_camera': bpy.props.PointerProperty(type=MMDCamera),
         'mmd_rigid': bpy.props.PointerProperty(type=MMDRigidBody),
         'mmd_joint': bpy.props.PointerProperty(type=MMDJoint),

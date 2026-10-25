@@ -60,16 +60,18 @@ class VPDExporter:
         return vpd_bones
 
 
-    def __exportPoseLib(self, armObj, pose_type, filepath, use_pose_mode=False):
+    def __exportPoseLib(self, armObj, pose_type, filepath, use_pose_mode=False, pose_index=-1):
+        from mmd_tools.core.pose_library import get_library, apply_pose
         if armObj is None:
-            return None
-        if armObj.pose_library is None:
-            return None
+            raise ValueError('请选择具有姿态库的角色骨架或角色根对象')
+        library = get_library(armObj)
+        if library is None or not library.pose_markers:
+            raise ValueError('没有可导出的姿态库，请先导入 VPD 或指定包含姿态标记的动作')
 
         pose_bones = armObj.pose.bones
         converters = self.__getConverters(pose_bones)
 
-        backup = {b:(b.matrix_basis.copy(), b.bone.select) for b in pose_bones}
+        backup = {b:(b.matrix_basis.copy(), b.bone.select, b.rotation_mode) for b in pose_bones}
         for b in pose_bones:
             b.bone.select = False
 
@@ -80,24 +82,27 @@ class VPDExporter:
         def __export_index(index, filepath):
             for b in pose_bones:
                 b.matrix_basis = matrix_basis_map.get(b, None) or Matrix.Identity(4)
-            bpy.ops.poselib.apply_pose(pose_index=index)
+            apply_pose(armObj, library, index)
             vpd_bones = self.__exportBones(armObj, converters, matrix_basis_map)
             self.__exportVPDFile(filepath, vpd_bones)
 
         try:
-            pose_markers = armObj.pose_library.pose_markers
+            pose_markers = library.pose_markers
             with bpyutils.select_object(armObj):
                 bpy.ops.object.mode_set(mode='POSE')
                 if pose_type == 'ACTIVE':
-                    if 0 <= pose_markers.active_index < len(pose_markers):
-                        __export_index(pose_markers.active_index, filepath)
+                    index = pose_index if pose_index >= 0 else pose_markers.active_index
+                    if not 0 <= index < len(pose_markers):
+                        raise ValueError('姿态库中没有选中的姿态')
+                    __export_index(index, filepath)
                 else:
                     folder = os.path.dirname(filepath)
                     for i, m in enumerate(pose_markers):
-                        __export_index(i, os.path.join(folder, m.name+'.vpd'))
+                        __export_index(i, os.path.join(folder, '%03d_%s.vpd' % (i + 1, bpy.path.clean_name(m.name))))
         finally:
             for b, bak in backup.items():
-                b.matrix_basis, b.bone.select = bak
+                b.rotation_mode = bak[2]
+                b.matrix_basis, b.bone.select = bak[:2]
 
 
     def __exportMorphs(self, meshObj):
@@ -131,7 +136,7 @@ class VPDExporter:
             use_pose_mode = args.get('use_pose_mode', False)
             if use_pose_mode:
                 self.__bone_util_cls = vmd.importer.BoneConverterPoseMode
-            self.__exportPoseLib(armature, pose_type, filepath, use_pose_mode)
+            self.__exportPoseLib(armature, pose_type, filepath, use_pose_mode, args.get('pose_index', -1))
         else:
             raise Exception('Unknown pose type "%s"', pose_type)
 
