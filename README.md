@@ -319,17 +319,17 @@ https://www.bilibili.com/opus/1136168885950611460
 
 [查看每项移植的 GitHub PR、提交及本版实现文件](docs/UPSTREAM.md)。
 
-<a id="faq"></a>
-
-## 在线更新与私密测试
+## 在线更新
 
 更新来源固定为 [DmXgDr/mmd-tools-3.6-continued](https://github.com/DmXgDr/mmd-tools-3.6-continued) 的正式 Releases，不会再更新到上游分支。检查更新不会自动安装，也不会在 Blender 启动时自动联网。程序核对版本、Blender 3.6 兼容标记、安装包结构和 SHA-256；没有新版本或校验失败时不替换当前插件。
 
 ![续更版在线更新入口](docs/images/online-update.png)
 
-私密测试阶段只有拥有仓库访问权限的账号可以下载。在「私密仓库验证（可选）」中可填写具有该仓库 Contents 读取权限的 GitHub 令牌，仅当前会话使用，不写入插件包、偏好设置或工程；也支持进程环境变量 `MMD_TOOLS_GITHUB_TOKEN`。仓库公开后无需填写令牌。遇到网络或权限问题时，可通过仓库链接手动下载。
+本仓库已公开，检查更新和下载安装包均无需登录 GitHub，也无需填写令牌。在「编辑 → 偏好设置 → 插件」中搜索“MMD Tools”，展开插件，在底部点击「检查续更版更新」；发现新版本后点击「下载并安装更新」。遇到网络问题时，可前往 [Releases 发布页面](https://github.com/DmXgDr/mmd-tools-3.6-continued/releases) 手动下载安装包。
 
 更新完成会提示重启。旧插件备份位于插件目录旁的 `.mmd-backup-日期时间-随机后缀` 文件夹；自动更新不修改用户的预设保存目录。
+
+<a id="faq"></a>
 
 ## 常见问题
 
