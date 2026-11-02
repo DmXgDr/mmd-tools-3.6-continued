@@ -193,6 +193,12 @@ def _reset_pose_without_autokey(context, armature):
         armature.hide_set(hidden)
 
 
+def clear_armature_motion(context, armature):
+    """Reset just the selected armature, leaving model morphs untouched."""
+    _reset_pose(context, armature)
+    context.view_layer.update()
+
+
 def clear_model_motion(context, root):
     rig = Model(root)
     meshes = list(rig.meshes())

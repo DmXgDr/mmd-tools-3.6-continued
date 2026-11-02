@@ -537,8 +537,8 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         name='修正翻倍后的表情突变间隔', default=False,
         description='仅时间 ×2 时生效；保守识别表情权重的持续跳变，只将对应表情关键帧前移 1 帧；跳过连续渐变和短暂尖峰，仍可能误判，请检查结果')
     clear_previous_motion: bpy.props.BoolProperty(
-        name='导入前清理角色旧动画', default=False,
-        description='仅对选中的角色根空物体生效：清除旧骨骼动画并重置姿态；有关键帧的表情归零，保留未打帧的表情值')
+        name='旧动画自动清理（旧参数兼容）', default=True, options={'HIDDEN', 'SKIP_SAVE'},
+        description='旧参数仅供历史预设和脚本兼容；根对象或骨架导入匹配动作时始终清理，传入 False 也不会关闭')
     import_motion_audio: bpy.props.BoolProperty(name='导入动作音频', default=False,
         description='仅选择角色根空物体时生效；查找 VMD 同目录音频，新增音轨并对齐动作起点')
     replace_motion_audio: bpy.props.BoolProperty(name='替换已有音频', default=False,
@@ -570,9 +570,6 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         layout.label(text='VMD 第 0 帧导入位置：第 %d 帧' % ((self.margin + 1) * (2 if self.convert_to_60fps else 1)))
         from ..core.vmd.import_options import selected_model_roots
         if selected_model_roots(context):
-            layout.prop(self, 'clear_previous_motion')
-            if self.clear_previous_motion:
-                layout.label(text='将清理骨骼、NLA 和有动画的表情', icon='INFO')
             layout.prop(self, 'import_motion_audio')
             if self.import_motion_audio:
                 layout.prop(self, 'replace_motion_audio')
@@ -600,11 +597,13 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         layout.prop(self, 'update_scene_settings')
 
     def execute(self, context):
-        from ..core.vmd.import_options import selected_model_roots, clear_model_motion
+        from ..core.vmd.import_options import selected_model_roots, clear_model_motion, clear_armature_motion
         if not self.properties.is_property_set('convert_to_60fps'):
             initialize_vmd_timing(self, context)
         roots = selected_model_roots(context)
-        roots_to_clear = set(roots) if self.clear_previous_motion else set()
+        roots_to_clear = set(roots)
+        armatures_to_clear = {obj for obj in context.selected_objects if obj.type == 'ARMATURE'}
+        pose_reference = {}
         root_members = {}
         selected_objects = set(context.selected_objects)
         camera_redirects = {obj: vmd_importer.VMDImporter.resolve_target(obj)
@@ -672,9 +671,20 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
                                 if (root in roots_to_clear or self.import_motion_audio)
                                 and any(importer.target_kind(obj) in {'bone', 'morph'}
                                        and importer.has_data_for(obj, match_names=True) for obj in members)}
+            compatible_armatures = {obj for obj in armatures_to_clear
+                                    if importer.has_data_for(obj, match_names=True)}
+            if self.use_pose_mode:
+                # Keep the explicitly requested pose as the import reference,
+                # even though old channels and the live pose are reset below.
+                for armature in bone_cut_targets:
+                    importer.prepare_pose_reference(armature, pose_reference)
             for root in roots_to_clear & compatible_roots:
                 clear_model_motion(context, root)
+                armatures_to_clear.discard(mmd_model.Model(root).armature())
             roots_to_clear -= compatible_roots
+            for armature in compatible_armatures & armatures_to_clear:
+                clear_armature_motion(context, armature)
+            armatures_to_clear -= compatible_armatures
             # Redirect the selection only after a valid camera VMD is parsed.
             # Wrong/empty files and a cancelled dialog leave selection alone.
             for root, camera in camera_redirects.items():

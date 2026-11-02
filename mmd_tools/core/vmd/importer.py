@@ -282,6 +282,21 @@ class VMDImporter:
         self.__cut_cache = {'bone': {}, 'morph': {}}
         self.__cut_detection_seconds = 0.0
         self.assigned_action_count = 0
+        self.__pose_reference = {}
+
+    def prepare_pose_reference(self, armature, reference):
+        """Snapshot explicit pose-as-rest settings before automatic cleanup."""
+        if self.__bone_util_cls is not BoneConverterPoseMode:
+            return
+        self.__pose_reference = reference
+        for bone in armature.pose.bones:
+            pointer = bone.as_pointer()
+            if pointer in reference:
+                continue
+            path = {'QUATERNION': 'rotation_quaternion', 'AXIS_ANGLE': 'rotation_axis_angle'}.get(bone.rotation_mode, 'rotation_euler')
+            rotation = getattr(bone, path)
+            rotation = rotation.copy() if hasattr(rotation, 'copy') else rotation[:]
+            reference[pointer] = (BoneConverterPoseMode(bone, self.__scale), bone.location.copy(), rotation)
 
     @staticmethod
     def resolve_target(obj):
@@ -427,7 +442,8 @@ class VMDImporter:
             raise TypeError('Unsupported type: {0}'.format(type(value)))
 
     def __getBoneConverter(self, bone):
-        converter = self.__bone_util_cls(bone, self.__scale)
+        reference = self.__pose_reference.get(bone.as_pointer())
+        converter = reference[0] if reference else self.__bone_util_cls(bone, self.__scale)
         mode = bone.rotation_mode
         compatible_quaternion = self.__minRotationDiff
         class _ConverterWrap:
@@ -517,8 +533,9 @@ class VMDImporter:
 
             fcurves = [dummy_keyframe_points]*7 # x, y, z, r0, r1, r2, (r3)
             data_path_rot = prop_rot_map.get(bone.rotation_mode, 'rotation_euler')
-            bone_rotation = getattr(bone, data_path_rot)
-            default_values = list(bone.location) + list(bone_rotation)
+            reference = self.__pose_reference.get(bone.as_pointer())
+            bone_rotation = reference[2] if reference else getattr(bone, data_path_rot)
+            default_values = list(reference[1] if reference else bone.location) + list(bone_rotation)
             data_path = 'pose.bones["%s"].location'%bone.name
             for axis_i in range(3):
                 fcurves[axis_i] = action.fcurves.new(data_path=data_path, index=axis_i, action_group=bone.name)
