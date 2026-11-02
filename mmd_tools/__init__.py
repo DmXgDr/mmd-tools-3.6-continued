@@ -3,10 +3,10 @@
 bl_info = {
     "name": "MMD Tools 3.6 续更版",
     "author": "sugiany / UuuNyaa / MMD Tools contributors / 晓光忆时",
-    "version": (3, 0, 0),
+    "version": (3, 0, 1),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > MMD Tools Panel",
-    "description": "MMD Tools v3.0.0 · Blender 3.6 非官方续更版 · 高版本功能移植与个人定制",
+    "description": "MMD Tools v3.0.1 · Blender 3.6 非官方续更版 · 高版本功能移植与个人定制",
     "warning": "",
     "doc_url": "https://github.com/DmXgDr/mmd-tools-3.6-continued#readme",
     "wiki_url": "https://github.com/DmXgDr/mmd-tools-3.6-continued#readme",
@@ -14,7 +14,7 @@ bl_info = {
     "category": "Object",
 }
 
-ENHANCED_RELEASE = "3.0.0"
+ENHANCED_RELEASE = "3.0.1"
 
 # The release version is independent of the existing model-data compatibility
 # marker. Keep the latter stable for previously saved models and integrations.

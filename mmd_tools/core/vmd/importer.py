@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from typing import Union
 
 import bpy
@@ -258,7 +259,9 @@ class HasAnimationData:
 class VMDImporter:
     def __init__(self, filepath, scale=1.0, bone_mapper=None, use_pose_mode=False,
             convert_mmd_camera=True, convert_mmd_lamp=True, frame_margin=5, use_mirror=False, use_NLA=False,
-            convert_to_60fps=False, repair_camera_cuts=False):
+            convert_to_60fps=False, repair_camera_cuts=False,
+            repair_bone_cuts=False, repair_morph_cuts=False,
+            bone_cut_targets=None, morph_cut_targets=None):
         self.__vmdFile = vmd.File()
         self.__vmdFile.load(filepath=filepath)
         logging.debug(str(self.__vmdFile.header))
@@ -271,7 +274,107 @@ class VMDImporter:
         self.__mirror = use_mirror
         self.__use_NLA = use_NLA
         self.__convert_to_60fps = convert_to_60fps
-        self.__repair_camera_cuts = repair_camera_cuts
+        self.__repair_camera_cuts = bool(convert_to_60fps and repair_camera_cuts)
+        self.__repair_bone_cuts = bool(convert_to_60fps and repair_bone_cuts)
+        self.__repair_morph_cuts = bool(convert_to_60fps and repair_morph_cuts)
+        self.__bone_cut_targets = None if bone_cut_targets is None else frozenset(bone_cut_targets)
+        self.__morph_cut_targets = None if morph_cut_targets is None else frozenset(morph_cut_targets)
+        self.__cut_cache = {'bone': {}, 'morph': {}}
+        self.__cut_detection_seconds = 0.0
+        self.assigned_action_count = 0
+
+    @staticmethod
+    def resolve_target(obj):
+        """Resolve an MMD camera root to its actual, unambiguous Camera."""
+        if obj is not None and obj.type == 'EMPTY' and obj.mmd_type == 'CAMERA':
+            cameras = [child for child in obj.children if child.type == 'CAMERA']
+            return cameras[0] if len(cameras) == 1 else None
+        return obj
+
+    @staticmethod
+    def target_kind(obj):
+        """Use the same target classification in the dialog and execution."""
+        obj = VMDImporter.resolve_target(obj)
+        if obj is None:
+            return None
+        if obj.type == 'CAMERA':
+            return 'camera'
+        if MMDLamp.isMMDLamp(obj) or obj.type in {'LIGHT', 'LAMP'}:
+            return 'lamp'
+        if getattr(obj.data, 'shape_keys', None):
+            return 'morph'
+        if obj.type == 'ARMATURE':
+            return 'bone'
+        if obj.mmd_type == 'ROOT':
+            return 'display'
+        return None
+
+    def __bone_map(self, obj):
+        bones = self.__bone_mapper(obj) if self.__bone_mapper else obj.pose.bones
+        return _MirrorMapper(bones) if self.__mirror else bones
+
+    def has_data_for(self, obj, match_names=False):
+        """Read-only preflight; do not convert objects or replace old actions.
+
+        Name matching is used before destructive model cleanup. It follows the
+        actual bone mapper/mirror rules, not a PMX-only or filename heuristic.
+        """
+        obj = self.resolve_target(obj)
+        kind = self.target_kind(obj)
+        source = self.__vmdFile
+        if kind == 'camera':
+            return bool(source.cameraAnimation) and (MMDCamera.isMMDCamera(obj) or self.__convert_mmd_camera)
+        if kind == 'lamp':
+            return bool(source.lampAnimation) and (MMDLamp.isMMDLamp(obj) or self.__convert_mmd_lamp)
+        if kind == 'display':
+            return bool(source.propertyAnimation)
+        if kind == 'bone':
+            if not source.boneAnimation:
+                return False
+            if not match_names:
+                return True
+            bones = self.__bone_map(obj)
+            return (any(frames and bones.get(name) is not None for name, frames in source.boneAnimation.items())
+                    or any(bones.get(name) is not None for key in source.propertyAnimation for name, _ in key.ik_states))
+        if kind == 'morph':
+            if not match_names:
+                return bool(source.shapeKeyAnimation)
+            # Match the names accepted by __assignToMesh, including its mirror
+            # mapping. Mirroring changes values' targets, not accepted names.
+            keys = obj.data.shape_keys.key_blocks
+            return any(frames and name in keys for name, frames in source.shapeKeyAnimation.items())
+        return False
+
+    @staticmethod
+    def target_key(obj):
+        """An MMD camera/light root and its child share the same import target."""
+        obj = VMDImporter.resolve_target(obj)
+        kind = VMDImporter.target_kind(obj)
+        if kind == 'camera' and MMDCamera.isMMDCamera(obj):
+            obj = MMDCamera(obj).object()
+        elif kind == 'lamp' and MMDLamp.isMMDLamp(obj):
+            obj = MMDLamp(obj).object()
+        elif kind == 'morph':
+            obj = obj.data.shape_keys
+        return kind, obj
+
+    def __motion_cut_frames(self, kind, name, frames):
+        """Analyze each imported source track once, without evaluating a scene."""
+        cache = self.__cut_cache[kind]
+        if name not in cache:
+            from .motion_cuts import detect_bone_cuts, detect_morph_cuts
+            start = time.perf_counter()
+            detect = detect_bone_cuts if kind == 'bone' else detect_morph_cuts
+            cache[name] = {frame + self.__frame_margin for frame in detect(frames)}
+            self.__cut_detection_seconds += time.perf_counter() - start
+        return cache[name]
+
+    def cut_repair_summary(self):
+        return {'bone_events': sum(map(len, self.__cut_cache['bone'].values())),
+                'morph_events': sum(map(len, self.__cut_cache['morph'].values())),
+                'bone_tracks_scanned': len(self.__cut_cache['bone']),
+                'morph_tracks_scanned': len(self.__cut_cache['morph']),
+                'detection_seconds': self.__cut_detection_seconds}
 
 
     @staticmethod
@@ -354,10 +457,15 @@ class VMDImporter:
                 compatible_rotation = lambda prev, curr: curr.make_compatible(prev) or curr
         return _ConverterWrap
 
-    def __assign_action(self, target: Union[bpy.types.ID, HasAnimationData], action: bpy.types.Action, cut_frames=()):
+    def __assign_action(self, target: Union[bpy.types.ID, HasAnimationData], action: bpy.types.Action, cut_frames=(), curve_cut_frames=None):
+        if not action.fcurves:
+            # Unmatched bone/morph names must not replace existing animation
+            # with an empty Action, or create an empty NLA strip.
+            bpy.data.actions.remove(action)
+            return
         if self.__convert_to_60fps:
             from .import_options import retime_action_60fps
-            retime_action_60fps(action, cut_frames)
+            retime_action_60fps(action, cut_frames, curve_cut_frames)
         if target.animation_data is None:
             target.animation_data_create()
 
@@ -369,6 +477,7 @@ class VMDImporter:
             target_track.name = action.name
             target_strip = target_track.strips.new(action.name, frame_current, action)
             target_strip.blend_type = 'COMBINE'
+        self.assigned_action_count += 1
 
     def __assignToArmature(self, armObj, action_name=None):
         boneAnim = self.__vmdFile.boneAnimation
@@ -381,13 +490,10 @@ class VMDImporter:
 
         extra_frame = 1 if self.__frame_margin > 1 else 0
 
-        pose_bones = armObj.pose.bones
-        if self.__bone_mapper:
-            pose_bones = self.__bone_mapper(armObj)
+        pose_bones = self.__bone_map(armObj)
 
         _loc = _rot = lambda i: i
         if self.__mirror:
-            pose_bones = _MirrorMapper(pose_bones)
             _loc, _rot = _MirrorMapper.get_location, _MirrorMapper.get_rotation
 
         class _Dummy: pass
@@ -395,6 +501,8 @@ class VMDImporter:
         prop_rot_map = {'QUATERNION':'rotation_quaternion', 'AXIS_ANGLE':'rotation_axis_angle'}
 
         bone_name_table = {}
+        curve_cut_frames = {}
+        repair_cuts = self.__repair_bone_cuts and (self.__bone_cut_targets is None or armObj in self.__bone_cut_targets)
         for name, keyFrames in boneAnim.items():
             num_frame = len(keyFrames)
             if num_frame < 1:
@@ -417,6 +525,15 @@ class VMDImporter:
             data_path = 'pose.bones["%s"].%s'%(bone.name, data_path_rot)
             for axis_i in range(len(bone_rotation)):
                 fcurves[3+axis_i] = action.fcurves.new(data_path=data_path, index=axis_i, action_group=bone.name)
+
+            if repair_cuts:
+                cuts = self.__motion_cut_frames('bone', name, keyFrames)
+                if cuts:
+                    # Move a bone's complete transform together. Other bones,
+                    # and morph channels at that same time, keep their keys.
+                    curve_cut_frames['pose.bones["%s"].location' % bone.name] = cuts
+                    curve_cut_frames[data_path] = cuts
+                    curve_cut_frames['pose.bones["%s"].mmd_ik_toggle' % bone.name] = cuts
 
             for i in range(len(default_values)):
                 c = fcurves[i]
@@ -480,7 +597,7 @@ class VMDImporter:
 
                     self.__keyframe_insert(action.fcurves, f'pose.bones["{bone.name}"].mmd_ik_toggle', frame, enable)
 
-        self.__assign_action(armObj, action)
+        self.__assign_action(armObj, action, curve_cut_frames=curve_cut_frames)
 
     def __assignToMesh(self, meshObj, action_name=None):
         shapeKeyAnim = self.__vmdFile.shapeKeyAnimation
@@ -495,13 +612,21 @@ class VMDImporter:
         shapeKeyDict = {k:mirror_map.get(k, v) for k, v in meshObj.data.shape_keys.key_blocks.items()}
 
         from math import floor, ceil
+        curve_cut_frames = {}
+        repair_cuts = self.__repair_morph_cuts and (self.__morph_cut_targets is None or meshObj in self.__morph_cut_targets)
         for name, keyFrames in shapeKeyAnim.items():
+            if not keyFrames:
+                continue
             if name not in shapeKeyDict:
                 logging.warning('WARNING: not found shape key %s (%d frames)', name, len(keyFrames))
                 continue
             logging.info('(mesh) frames:%5d  name: %s', len(keyFrames), name)
             shapeKey = shapeKeyDict[name]
             fcurve = action.fcurves.new(data_path='key_blocks["%s"].value'%shapeKey.name)
+            if repair_cuts:
+                cuts = self.__motion_cut_frames('morph', name, keyFrames)
+                if cuts:
+                    curve_cut_frames[fcurve.data_path] = cuts
             fcurve.keyframe_points.add(len(keyFrames))
             keyFrames.sort(key=lambda x:x.frame_number)
             for k, v in zip(keyFrames, fcurve.keyframe_points):
@@ -511,7 +636,7 @@ class VMDImporter:
             shapeKey.slider_min = min(shapeKey.slider_min, floor(min(weights)))
             shapeKey.slider_max = max(shapeKey.slider_max, ceil(max(weights)))
 
-        self.__assign_action(meshObj.data.shape_keys, action)
+        self.__assign_action(meshObj.data.shape_keys, action, curve_cut_frames=curve_cut_frames)
 
     def __assignToRoot(self, rootObj, action_name=None):
         propertyAnim = self.__vmdFile.propertyAnimation
@@ -541,9 +666,13 @@ class VMDImporter:
                     f.interpolation = 'CONSTANT'
 
     def __assignToCamera(self, cameraObj, action_name=None):
+        cameraAnim = self.__vmdFile.cameraAnimation
+        if not cameraAnim:
+            return
         mmdCameraInstance = MMDCamera.convertToMMDCamera(cameraObj, self.__scale)
         mmdCamera = mmdCameraInstance.object()
-        cameraObj = mmdCameraInstance.camera()
+        # Keep the actual selected Camera; a root may have multiple camera
+        # children, and camera() would silently choose the first one.
 
         cameraAnim = self.__vmdFile.cameraAnimation
         logging.info('(camera) frames:%5d  name: %s', len(cameraAnim), mmdCamera.name)
@@ -612,6 +741,9 @@ class VMDImporter:
                     f.interpolation = 'CONSTANT'
 
     def __assignToLamp(self, lampObj, action_name=None):
+        lampAnim = self.__vmdFile.lampAnimation
+        if not lampAnim:
+            return
         mmdLampInstance = MMDLamp.convertToMMDLamp(lampObj, self.__scale)
         mmdLamp = mmdLampInstance.object()
         lampObj = mmdLampInstance.lamp()
@@ -639,25 +771,25 @@ class VMDImporter:
 
 
     def assign(self, obj, action_name=None):
-        if obj is None:
-            return
+        obj = self.resolve_target(obj)
+        if not self.has_data_for(obj):
+            return False
+        previous_count = self.assigned_action_count
         if action_name is None:
             action_name = os.path.splitext(os.path.basename(self.__vmdFile.filepath))[0]
 
-        if MMDCamera.isMMDCamera(obj):
+        kind = self.target_kind(obj)
+        if kind == 'camera':
             self.__assignToCamera(obj, action_name+'_camera')
-        elif MMDLamp.isMMDLamp(obj):
+        elif kind == 'lamp':
             self.__assignToLamp(obj, action_name+'_lamp')
-        elif getattr(obj.data, 'shape_keys', None):
+        elif kind == 'morph':
             self.__assignToMesh(obj, action_name+'_facial')
-        elif obj.type == 'ARMATURE':
+        elif kind == 'bone':
             self.__assignToArmature(obj, action_name+'_bone')
-        elif obj.type == 'CAMERA' and self.__convert_mmd_camera:
-            self.__assignToCamera(obj, action_name+'_camera')
-        elif obj.type == 'LAMP' and self.__convert_mmd_lamp:
-            self.__assignToLamp(obj, action_name+'_lamp')
-        elif obj.mmd_type == 'ROOT':
+        elif kind == 'display':
             self.__assignToRoot(obj, action_name+'_display')
         else:
             pass
+        return self.assigned_action_count > previous_count
 

@@ -19,13 +19,15 @@ def _camera_delta(a, b):
 
 
 def camera_cut_frames(frames):
-    """Sparse camera: one-frame pairs; baked camera: clear jumps only.
+    """Isolated one-frame pairs: close the gap; key clusters: clear jumps.
 
-    VMD has no baked/cut flag. A run of >=8 consecutive keys is dense, or the
-    entire file is dense when >=80% of gaps are one frame (minimum 8 keys,
-    no gap greater than 2). Longer gaps split sparse and baked sections.
-    Dense data requires both an absolute jump and >=5x neighboring speed;
-    perspective switches are discrete. Source units make this scale independent.
+    VMD has no baked/cut flag. Three or more consecutive keys may contain
+    motion anchors before/after a cut; even a short four-key cluster must not
+    be treated as three cuts. Such clusters require both an absolute jump and
+    >=5x neighboring speed. Keep the same check for mostly baked files (>=80%
+    one-frame gaps, at least 8 keys, no gap greater than 2). Only isolated
+    two-key pairs outside those files retain the sparse-camera gap rule.
+    Perspective switches are discrete. Source units make this scale independent.
     """
     frames = sorted(frames, key=lambda key: key.frame_number)
     gaps = [b.frame_number-a.frame_number for a, b in zip(frames, frames[1:])]
@@ -37,7 +39,7 @@ def camera_cut_frames(frames):
     start = 0
     for end in range(len(gaps)+1):
         if end == len(gaps) or gaps[end] != 1:
-            if end-start >= 7:
+            if end-start >= 2:
                 dense.update(range(start, end))
             start = end+1
     result = set()
@@ -56,18 +58,20 @@ def camera_cut_frames(frames):
     return result
 
 
-def retime_action_60fps(action, cut_frames=()):
+def retime_action_60fps(action, cut_frames=(), curve_cut_frames=None):
     """Scale a newly imported action about frame zero, then close cut gaps.
 
     Handle coordinates follow exactly the same affine transform as each key.
-    Existing/shared actions and drivers are never retimed here.
+    Existing/shared actions and drivers are never retimed here. Body and morph
+    cuts are scoped by RNA path; the camera's shared cut-frame set is unchanged.
     """
     cuts = set(cut_frames)
     for curve in action.fcurves:
+        scoped_cuts = curve_cut_frames.get(curve.data_path, cuts) if curve_cut_frames else cuts
         points = list(curve.keyframe_points)
         original = [float(key.co.x) for key in points]
         for key, frame in zip(points, original):
-            shift = -1.0 if frame in cuts else 0.0
+            shift = -1.0 if frame in scoped_cuts else 0.0
             co, left, right = key.co.copy(), key.handle_left.copy(), key.handle_right.copy()
             co.x = co.x*2.0 + shift
             left.x = left.x*2.0 + shift

@@ -227,8 +227,8 @@ def motion_files(operator):
     return paths or ([operator.filepath] if operator.filepath else [])
 
 
-def candidates(operator):
-    paths = motion_files(operator)
+def candidates(operator, paths=None):
+    paths = motion_files(operator) if paths is None else paths
     result = []
     for folder in sorted({os.path.dirname(os.path.abspath(p)) for p in paths}):
         if os.path.isdir(folder):
@@ -245,13 +245,14 @@ def motion_audio_items(operator, context):
     return _enum_cache[files]
 
 
-def resolve_motion_audio(operator):
-    files = candidates(operator)
+def resolve_motion_audio(operator, paths=None):
+    paths = motion_files(operator) if paths is None else paths
+    files = candidates(operator, paths=paths)
     if operator.motion_audio_choice != 'AUTO':
         selected = next((p for p in files if hashlib.sha256(p.encode('utf-8')).hexdigest() == operator.motion_audio_choice), None)
         if not selected:return None
         return selected
-    stems = {os.path.splitext(os.path.basename(p))[0].casefold() for p in motion_files(operator)}
+    stems = {os.path.splitext(os.path.basename(p))[0].casefold() for p in paths}
     matched = [p for p in files if os.path.splitext(os.path.basename(p))[0].casefold() in stems]
     if len(matched) == 1:return matched[0]
     if len(files) == 1:return files[0]

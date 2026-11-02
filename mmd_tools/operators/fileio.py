@@ -440,6 +440,24 @@ class ImportPmx(Operator, ImportHelper, PreferencesMixin):
     def cancel(self, context):
         self.restore_preferences_on_cancel()
 
+def motion_cut_selection(context):
+    """Capabilities of the explicitly selected import targets, not ancestors."""
+    bone = morph = False
+    for obj in context.selected_objects:
+        if getattr(obj, 'mmd_type', None) == 'ROOT':
+            bone = morph = True
+        elif obj.type == 'ARMATURE':
+            bone = True
+        elif obj.type == 'MESH' and getattr(obj, 'mmd_type', None) == 'PLACEHOLDER':
+            morph = True
+    return bone, morph
+
+
+def camera_import_selection(context):
+    return any(vmd_importer.VMDImporter.target_kind(obj) == 'camera'
+               for obj in context.selected_objects)
+
+
 class ImportVmd(Operator, ImportHelper, PreferencesMixin):
     bl_idname = 'mmd_tools.import_vmd'
     bl_label = 'Import VMD File (.vmd)'
@@ -511,7 +529,13 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         description='默认按当前工程实际帧率是否为 60 判断；以第 0 帧为基准翻倍关键帧与手柄时间，包含边距；已转换的 VMD 请取消')
     repair_camera_cuts: bpy.props.BoolProperty(
         name='修正翻倍后的镜头切换间隔', default=False,
-        description='只在时间翻倍时生效；推断普通镜头相邻帧及烘焙段明显跳变，将后一关键帧前移 1 帧；可能误判，请检查结果')
+        description='只在时间翻倍时生效；独立相邻帧对按间隔处理，连续关键帧簇及烘焙段识别明显跳变，将切镜后一关键帧前移 1 帧；可能误判，请检查结果')
+    repair_bone_cuts: bpy.props.BoolProperty(
+        name='修正翻倍后的骨骼突变间隔', default=False,
+        description='仅时间 ×2 时生效；保守识别骨骼持续的姿态突变，将该骨骼整组关键帧前移 1 帧；保留连续运动和短暂尖峰，请检查结果')
+    repair_morph_cuts: bpy.props.BoolProperty(
+        name='修正翻倍后的表情突变间隔', default=False,
+        description='仅时间 ×2 时生效；保守识别表情权重的持续跳变，只将对应表情关键帧前移 1 帧；跳过连续渐变和短暂尖峰，仍可能误判，请检查结果')
     clear_previous_motion: bpy.props.BoolProperty(
         name='导入前清理角色旧动画', default=False,
         description='仅对选中的角色根空物体生效：清除旧骨骼动画并重置姿态；有关键帧的表情归零，保留未打帧的表情值')
@@ -535,9 +559,14 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         layout.prop(self, 'scale')
         layout.prop(self, 'margin')
         layout.prop(self, 'convert_to_60fps')
-        row = layout.row()
-        row.enabled = self.convert_to_60fps
-        row.prop(self, 'repair_camera_cuts')
+        allow_bone, allow_morph = motion_cut_selection(context)
+        if self.convert_to_60fps:
+            if camera_import_selection(context):
+                layout.prop(self, 'repair_camera_cuts')
+            if allow_bone:
+                layout.prop(self, 'repair_bone_cuts')
+            if allow_morph:
+                layout.prop(self, 'repair_morph_cuts')
         layout.label(text='VMD 第 0 帧导入位置：第 %d 帧' % ((self.margin + 1) * (2 if self.convert_to_60fps else 1)))
         from ..core.vmd.import_options import selected_model_roots
         if selected_model_roots(context):
@@ -559,12 +588,13 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
                     layout.label(text='同目录有多个音频，请选择。', icon='INFO')
         layout.prop(self, 'use_NLA')
 
-        layout.prop(self, 'bone_mapper')
-        if self.bone_mapper == 'RENAMED_BONES':
-            layout.prop(self, 'rename_bones')
-            layout.prop(self, 'use_underscore')
-            layout.prop(self, 'dictionary')
-        layout.prop(self, 'use_pose_mode')
+        if allow_bone:
+            layout.prop(self, 'bone_mapper')
+            if self.bone_mapper == 'RENAMED_BONES':
+                layout.prop(self, 'rename_bones')
+                layout.prop(self, 'use_underscore')
+                layout.prop(self, 'dictionary')
+            layout.prop(self, 'use_pose_mode')
         layout.prop(self, 'use_mirror')
 
         layout.prop(self, 'update_scene_settings')
@@ -573,22 +603,34 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         from ..core.vmd.import_options import selected_model_roots, clear_model_motion
         if not self.properties.is_property_set('convert_to_60fps'):
             initialize_vmd_timing(self, context)
-        audio_path = None
-        if self.import_motion_audio and selected_model_roots(context):
-            from ..audio_transfer import resolve_motion_audio, AudioError
-            try:
-                audio_path = resolve_motion_audio(self)
-            except (AudioError, OSError) as exc:
-                self.report({'WARNING'}, '跳过音频，继续导入动作：' + str(exc))
-        roots_to_clear = selected_model_roots(context) if self.clear_previous_motion else []
+        roots = selected_model_roots(context)
+        roots_to_clear = set(roots) if self.clear_previous_motion else set()
+        root_members = {}
         selected_objects = set(context.selected_objects)
+        camera_redirects = {obj: vmd_importer.VMDImporter.resolve_target(obj)
+                            for obj in selected_objects
+                            if obj.type == 'EMPTY' and obj.mmd_type == 'CAMERA'}
+        for root, camera in camera_redirects.items():
+            if camera is not None:
+                selected_objects.discard(root)
+                selected_objects.add(camera)
+        bone_cut_targets = {obj for obj in selected_objects if obj.type == 'ARMATURE'}
+        morph_cut_targets = {obj for obj in selected_objects
+                             if obj.type == 'MESH' and getattr(obj, 'mmd_type', None) == 'PLACEHOLDER'}
         for i in frozenset(selected_objects):
             root = mmd_model.Model.findRoot(i)
             if root == i:
                 rig = mmd_model.Model(root)
-                selected_objects.add(rig.armature())
-                selected_objects.add(rig.morph_slider.placeholder())
-                selected_objects |= set(rig.meshes())
+                members = {rig.armature(), rig.morph_slider.placeholder()} | set(rig.meshes())
+                members.discard(None)
+                root_members[root] = members
+                selected_objects |= members
+                bone_cut_targets.add(rig.armature())
+                morph_cut_targets.add(rig.morph_slider.placeholder())
+                morph_cut_targets.update(rig.meshes())
+        bone_cut_targets.discard(None)
+        morph_cut_targets.discard(None)
+        allow_camera = camera_import_selection(context)
 
         bone_mapper = None
         if self.bone_mapper == 'PMX':
@@ -600,10 +642,15 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
                 translator=DictionaryEnum.get_translator(self.dictionary),
                 ).init
 
-        for file in self.files:
+        paths = [os.path.join(self.directory, file.name) for file in self.files]
+        if not paths and self.filepath:
+            paths = [self.filepath]
+        assigned_count = 0
+        motion_audio_paths = []
+        for filepath in paths:
             start_time = time.time()
             importer = vmd_importer.VMDImporter(
-                filepath=os.path.join(self.directory, file.name),
+                filepath=filepath,
                 scale=self.scale,
                 bone_mapper=bone_mapper,
                 use_pose_mode=self.use_pose_mode,
@@ -611,24 +658,66 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
                 use_mirror=self.use_mirror,
                 use_NLA=self.use_NLA,
                 convert_to_60fps=self.convert_to_60fps,
-                repair_camera_cuts=self.repair_camera_cuts,
+                repair_camera_cuts=self.convert_to_60fps and self.repair_camera_cuts and allow_camera,
+                repair_bone_cuts=self.convert_to_60fps and self.repair_bone_cuts and bool(bone_cut_targets),
+                repair_morph_cuts=self.convert_to_60fps and self.repair_morph_cuts and bool(morph_cut_targets),
+                bone_cut_targets=bone_cut_targets,
+                morph_cut_targets=morph_cut_targets,
                 )
 
-            # Parse the first file before clearing. Reset once per batch, so
-            # later files/NLA strips in the same drop do not erase earlier ones.
-            for root in roots_to_clear:
+            # Parse and match actual bone/morph names before destructive cleanup.
+            # A camera-only/unmatched file must not clear a selected character.
+            # Reset each root once, at its first compatible file in this batch.
+            compatible_roots = {root for root, members in root_members.items()
+                                if (root in roots_to_clear or self.import_motion_audio)
+                                and any(importer.target_kind(obj) in {'bone', 'morph'}
+                                       and importer.has_data_for(obj, match_names=True) for obj in members)}
+            for root in roots_to_clear & compatible_roots:
                 clear_model_motion(context, root)
-            roots_to_clear = []
-            for i in selected_objects:
+            roots_to_clear -= compatible_roots
+            # Redirect the selection only after a valid camera VMD is parsed.
+            # Wrong/empty files and a cancelled dialog leave selection alone.
+            for root, camera in camera_redirects.items():
+                if camera is not None and importer.has_data_for(camera):
+                    camera.select_set(True)
+                    root.select_set(False)
+                    if context.view_layer.objects.active == root:
+                        context.view_layer.objects.active = camera
+            assigned_targets = set()
+            # If two selected meshes share one Key datablock, prefer the
+            # explicitly allowed repair target before deduplicating that data.
+            for i in sorted(selected_objects, key=lambda obj: (obj not in morph_cut_targets, obj.name)):
+                target_key = importer.target_key(i)
+                if target_key in assigned_targets:
+                    continue
+                assigned_targets.add(target_key)
                 importer.assign(i)
+            assigned_count += importer.assigned_action_count
+            if compatible_roots and importer.assigned_action_count:
+                motion_audio_paths.append(filepath)
+            if self.convert_to_60fps and (self.repair_bone_cuts or self.repair_morph_cuts):
+                logging.info(' Motion cut repair: %s', importer.cut_repair_summary())
             logging.info(' Finished importing motion in %f seconds.', time.time() - start_time)
 
+        if not assigned_count:
+            if any(obj.type == 'EMPTY' and obj.mmd_type == 'CAMERA' for obj in selected_objects):
+                self.report({'WARNING'}, 'MMD_Camera 下没有唯一的 Camera，相机缺失时请先补全；有多个时请直接选中要导入的 Camera。')
+            else:
+                self.report({'WARNING'}, 'VMD 中没有匹配当前所选对象的动画，未更改原有动画或场景帧率。')
+            return {'CANCELLED'}
         if self.update_scene_settings:
             auto_scene_setup.setupFrameRanges()
             auto_scene_setup.setupFps()
             if self.convert_to_60fps:
                 context.scene.render.fps = 60
         context.scene.frame_set(context.scene.frame_current)
+        audio_path = None
+        if self.import_motion_audio and motion_audio_paths:
+            from ..audio_transfer import resolve_motion_audio, AudioError
+            try:
+                audio_path = resolve_motion_audio(self, paths=motion_audio_paths)
+            except (AudioError, OSError) as exc:
+                self.report({'WARNING'}, '跳过音频，继续导入动作：' + str(exc))
         if audio_path:
             from ..audio_transfer import AudioReplacement
             replacement = AudioReplacement(context.scene, replace_existing=self.replace_motion_audio)
