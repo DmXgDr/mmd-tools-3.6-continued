@@ -516,7 +516,7 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         )
     update_scene_settings: bpy.props.BoolProperty(
         name='Update scene settings',
-        description='更新帧范围与帧率：勾选转换为 60 帧时使用 60 fps，否则使用 30 fps',
+        description='仅更新场景和刚体缓存的结束帧，保留各自的起始帧；工程实际帧率为 60 时保持不变，否则设为 30 fps；与时间 ×2 独立',
         default=True,
         )
     use_NLA: bpy.props.BoolProperty(
@@ -597,7 +597,7 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         layout.prop(self, 'update_scene_settings')
 
     def execute(self, context):
-        from ..core.vmd.import_options import selected_model_roots, clear_model_motion, clear_armature_motion
+        from ..core.vmd.import_options import selected_model_roots, clear_model_motion, clear_armature_motion, remove_unused_replaced_actions
         if not self.properties.is_property_set('convert_to_60fps'):
             initialize_vmd_timing(self, context)
         roots = selected_model_roots(context)
@@ -645,6 +645,7 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         if not paths and self.filepath:
             paths = [self.filepath]
         assigned_count = 0
+        retired_actions = set()
         motion_audio_paths = []
         for filepath in paths:
             start_time = time.time()
@@ -679,11 +680,11 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
                 for armature in bone_cut_targets:
                     importer.prepare_pose_reference(armature, pose_reference)
             for root in roots_to_clear & compatible_roots:
-                clear_model_motion(context, root)
+                retired_actions.update(clear_model_motion(context, root))
                 armatures_to_clear.discard(mmd_model.Model(root).armature())
             roots_to_clear -= compatible_roots
             for armature in compatible_armatures & armatures_to_clear:
-                clear_armature_motion(context, armature)
+                retired_actions.update(clear_armature_motion(context, armature))
             armatures_to_clear -= compatible_armatures
             # Redirect the selection only after a valid camera VMD is parsed.
             # Wrong/empty files and a cancelled dialog leave selection alone.
@@ -703,6 +704,7 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
                 assigned_targets.add(target_key)
                 importer.assign(i)
             assigned_count += importer.assigned_action_count
+            retired_actions.update(importer.replaced_actions)
             if compatible_roots and importer.assigned_action_count:
                 motion_audio_paths.append(filepath)
             if self.convert_to_60fps and (self.repair_bone_cuts or self.repair_morph_cuts):
@@ -715,11 +717,10 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
             else:
                 self.report({'WARNING'}, 'VMD 中没有匹配当前所选对象的动画，未更改原有动画或场景帧率。')
             return {'CANCELLED'}
+        remove_unused_replaced_actions(retired_actions)
         if self.update_scene_settings:
-            auto_scene_setup.setupFrameRanges()
-            auto_scene_setup.setupFps()
-            if self.convert_to_60fps:
-                context.scene.render.fps = 60
+            auto_scene_setup.setupFrameRanges(end_only=True, skip_unused=True)
+            auto_scene_setup.setupFps(preserve_60=True)
         context.scene.frame_set(context.scene.frame_current)
         audio_path = None
         if self.import_motion_audio and motion_audio_paths:

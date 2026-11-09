@@ -282,6 +282,7 @@ class VMDImporter:
         self.__cut_cache = {'bone': {}, 'morph': {}}
         self.__cut_detection_seconds = 0.0
         self.assigned_action_count = 0
+        self.replaced_actions = set()
         self.__pose_reference = {}
 
     def prepare_pose_reference(self, armature, reference):
@@ -486,7 +487,10 @@ class VMDImporter:
             target.animation_data_create()
 
         if not self.__use_NLA:
+            previous_action = target.animation_data.action
             target.animation_data.action = action
+            if previous_action is not None and previous_action != action:
+                self.replaced_actions.add(previous_action)
         else:
             frame_current = bpy.context.scene.frame_current * (2 if self.__convert_to_60fps else 1)
             target_track: bpy.types.NlaTrack = target.animation_data.nla_tracks.new()

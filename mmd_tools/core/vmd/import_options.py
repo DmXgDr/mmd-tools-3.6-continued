@@ -98,11 +98,13 @@ def _remove_channels(owner, predicate):
     """Detach just the requested channels, copying actions to protect other users."""
     animation = owner.animation_data
     if not animation:
-        return
+        return set()
     copies = {}
+    retired = set()
     def without(action):
         if not action or not any(predicate(fc) for fc in action.fcurves):
             return action
+        retired.add(action)
         if action.as_pointer() not in copies:
             if all(predicate(fc) for fc in action.fcurves):
                 copies[action.as_pointer()] = None
@@ -123,6 +125,24 @@ def _remove_channels(owner, predicate):
                 strip.action = cleaned
         if not track.strips:
             animation.nla_tracks.remove(track)
+    return retired
+
+
+def remove_unused_replaced_actions(actions):
+    """Delete only Actions retired by this successful import, never other orphans.
+
+    Shared/NLA users, explicit fake-user/asset saves and linked data are kept.
+    Defer deletion until the batch succeeds so a failed import retains recovery
+    data. do_unlink=False is a final safeguard against affecting another user.
+    """
+    removed = []
+    for action in actions:
+        if (action.users == 0 and not action.use_fake_user
+                and action.asset_data is None and action.library is None
+                and action.override_library is None):
+            removed.append(action.name)
+            bpy.data.actions.remove(action, do_unlink=False)
+    return removed
 
 
 def _reset_pose(context, armature):
@@ -135,7 +155,7 @@ def _reset_pose(context, armature):
     Auto Keying for this internal reset and always restore the user's setting.
     """
     if armature is None:
-        return
+        return set()
     settings = context.scene.tool_settings
     previous_auto_key = settings.use_keyframe_insert_auto
     try:
@@ -147,8 +167,8 @@ def _reset_pose(context, armature):
 
 def _reset_pose_without_autokey(context, armature):
     if armature is None:
-        return
-    _remove_channels(armature, lambda fc: fc.data_path.startswith('pose.bones['))
+        return set()
+    retired = _remove_channels(armature, lambda fc: fc.data_path.startswith('pose.bones['))
     mode = armature.mode
     active = context.view_layer.objects.active
     selected = list(context.selected_objects)
@@ -191,12 +211,14 @@ def _reset_pose_without_autokey(context, armature):
         context.view_layer.objects.active = active
         armature.hide_viewport, hidden, armature.hide_select = object_hidden
         armature.hide_set(hidden)
+    return retired
 
 
 def clear_armature_motion(context, armature):
     """Reset just the selected armature, leaving model morphs untouched."""
-    _reset_pose(context, armature)
+    retired = _reset_pose(context, armature)
     context.view_layer.update()
+    return retired
 
 
 def clear_model_motion(context, root):
@@ -217,6 +239,7 @@ def clear_model_motion(context, root):
                 copies[data.as_pointer()] = data.copy()
             mesh.data = copies[data.as_pointer()]
     seen = set()
+    retired = set()
     # Drivers are deliberately excluded: the morph binding remains intact.
     for mesh in meshes:
         keys = mesh.data.shape_keys
@@ -227,8 +250,9 @@ def clear_model_motion(context, root):
                  if len(fc.keyframe_points) or len(fc.sampled_points)}
         keyed = [key for key in keys.key_blocks if key.path_from_id('value') in paths]
         keyed_paths = {key.path_from_id('value') for key in keyed}
-        _remove_channels(keys, lambda fc: fc.data_path in keyed_paths)
+        retired.update(_remove_channels(keys, lambda fc: fc.data_path in keyed_paths))
         for key in keyed:
             key.value = 0.0
-    _reset_pose(context, rig.armature())
+    retired.update(_reset_pose(context, rig.armature()))
     context.view_layer.update()
+    return retired
