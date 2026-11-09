@@ -205,19 +205,24 @@ class __PmxExporter:
         if sort_vertices:
             self.__sortVertices()
 
-    def __exportTexture(self, filepath):
+    def __exportTexture(self, filepath, image=None):
         if filepath.strip() == '':
-            return -1
+            if image is None or image.packed_file is None:
+                return -1
+            filepath = os.path.basename(image.name)
+            if not os.path.splitext(filepath)[1]:
+                filepath += '.png'
         # Use bpy.path to resolve '//' in .blend relative filepaths
-        filepath = bpy.path.abspath(filepath)
+        filepath = bpy.path.abspath(filepath, library=image.library if image else None)
         filepath = os.path.abspath(filepath)
         for i, tex in enumerate(self.__model.textures):
-            if os.path.normcase(tex.path) == os.path.normcase(filepath):
+            if os.path.normcase(tex.path) == os.path.normcase(filepath) and getattr(tex, 'blender_image', None) == image:
                 return i
         t = pmx.Texture()
         t.path = filepath
+        t.blender_image = image
         self.__model.textures.append(t)
-        if not os.path.isfile(t.path):
+        if not os.path.isfile(t.path) and not (image and image.packed_file):
             logging.warning('  The texture file does not exist: %s', t.path)
         return len(self.__model.textures) - 1
 
@@ -229,8 +234,10 @@ class __PmxExporter:
         tex_copy_list = []
         for texture in self.__model.textures:
             path = texture.path
+            image = getattr(texture, 'blender_image', None)
+            packed = image.packed_file if image else None
             tex_dir = output_dir  # restart to the default directory at each loop
-            if not os.path.isfile(path):
+            if not os.path.isfile(path) and packed is None:
                 logging.warning('*** skipping texture file which does not exist: %s', path)
                 path_set.add(os.path.normcase(path))
                 continue
@@ -250,20 +257,25 @@ class __PmxExporter:
             else:
                 tex_dir = tex_dir_fallback
             dest_path = os.path.join(tex_dir, dst_name)
-            if os.path.normcase(path) != os.path.normcase(dest_path): # Only copy if the paths are different
-                tex_copy_list.append((texture, path, dest_path))
+            if packed is not None or os.path.normcase(path) != os.path.normcase(dest_path): # Only copy if the paths are different
+                tex_copy_list.append((texture, path, dest_path, packed))
             else:
                 path_set.add(os.path.normcase(path))
 
-        for texture, path, dest_path in tex_copy_list:
+        for texture, path, dest_path, packed in tex_copy_list:
             counter = 1
             base, ext = os.path.splitext(dest_path)
-            while os.path.normcase(dest_path) in path_set:
+            while os.path.normcase(dest_path) in path_set or (packed is not None and os.path.exists(dest_path)):
                 dest_path = '%s_%d%s'%(base, counter, ext)
                 counter += 1
             path_set.add(os.path.normcase(dest_path))
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            shutil.copyfile(path, dest_path)
+            if packed is not None:
+                # Exact packed bytes, no filename search or source Image changes.
+                with open(dest_path, 'wb') as stream:
+                    stream.write(packed.data)
+            else:
+                shutil.copyfile(path, dest_path)
             logging.info('Copy file %s --> %s', path, dest_path)
             texture.path = dest_path
 
@@ -293,18 +305,20 @@ class __PmxExporter:
         fnMat = FnMaterial(material)
         tex = fnMat.get_texture()
         if tex and tex.type == 'IMAGE' and tex.image:  # Ensure the texture is an image
-            index = self.__exportTexture(tex.image.filepath)
+            index = self.__exportTexture(tex.image.filepath, image=tex.image)
             p_mat.texture = index
         tex = fnMat.get_sphere_texture()
         if tex and tex.type == 'IMAGE' and tex.image:  # Ensure the texture is an image
-            index = self.__exportTexture(tex.image.filepath)
+            index = self.__exportTexture(tex.image.filepath, image=tex.image)
             p_mat.sphere_texture = index
 
         if mmd_mat.is_shared_toon_texture:
             p_mat.toon_texture = mmd_mat.shared_toon_texture
             p_mat.is_shared_toon_texture = True
         else:
-            p_mat.toon_texture =  self.__exportTexture(mmd_mat.toon_texture)
+            tex = fnMat.get_toon_texture()
+            image = tex.image if tex and tex.type == 'IMAGE' else None
+            p_mat.toon_texture = self.__exportTexture(image.filepath if image and image.filepath else mmd_mat.toon_texture, image=image)
             p_mat.is_shared_toon_texture = False
 
         self.__material_name_table.append(material.name)

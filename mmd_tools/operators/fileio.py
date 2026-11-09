@@ -28,6 +28,7 @@ import mmd_tools.core.vmd.exporter as vmd_exporter
 import mmd_tools.core.vpd.importer as vpd_importer
 import mmd_tools.core.vpd.exporter as vpd_exporter
 import mmd_tools.core.model as mmd_model
+from mmd_tools.core import pmx, pmd
 
 
 
@@ -389,9 +390,13 @@ class ImportPmx(Operator, ImportHelper, PreferencesMixin):
                     self._do_execute(context)
             elif self.filepath:
                 self._do_execute(context)
+        except (pmx.InvalidFileError, pmx.UnsupportedVersionError, pmd.InvalidFileError, pmd.UnsupportedVersionError) as e:
+            self.report({'ERROR'}, '模型文件无法读取：%s：%s' % (os.path.basename(self.filepath), e))
+            return {'CANCELLED'}
         except Exception as e:
             err_msg = traceback.format_exc()
             self.report({'ERROR'}, err_msg)
+            return {'CANCELLED'}
         return {'FINISHED'}
 
     def _do_execute(self, context):
@@ -597,6 +602,22 @@ class ImportVmd(Operator, ImportHelper, PreferencesMixin):
         layout.prop(self, 'update_scene_settings')
 
     def execute(self, context):
+        from ..core.vmd.import_transaction import ImportTransaction
+        transaction = None
+        try:
+            transaction = ImportTransaction(context)
+            with transaction:
+                result = self._execute_motion(context)
+                if result == {'FINISHED'}:
+                    transaction.commit()
+                return result
+        except Exception as error:
+            logging.exception('VMD import failed; restoring the previous animation')
+            message = '动作导入失败，已恢复导入前状态' if transaction and transaction.restored else '动作导入失败，请检查系统控制台中的详细信息'
+            self.report({'ERROR'}, '%s：%s' % (message, error))
+            return {'CANCELLED'}
+
+    def _execute_motion(self, context):
         from ..core.vmd.import_options import selected_model_roots, clear_model_motion, clear_armature_motion, remove_unused_replaced_actions
         if not self.properties.is_property_set('convert_to_60fps'):
             initialize_vmd_timing(self, context)

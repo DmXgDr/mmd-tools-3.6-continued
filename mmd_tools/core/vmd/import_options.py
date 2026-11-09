@@ -120,11 +120,21 @@ def _remove_channels(owner, predicate):
         for strip in list(track.strips):
             cleaned = without(strip.action)
             if strip.action and cleaned is None:
-                track.strips.remove(strip)
+                from .import_transaction import current_transaction
+                transaction = current_transaction()
+                if transaction is not None:
+                    transaction.defer_strip_removal(owner, track, strip)
+                else:
+                    track.strips.remove(strip)
             elif cleaned != strip.action:
                 strip.action = cleaned
         if not track.strips:
-            animation.nla_tracks.remove(track)
+            from .import_transaction import current_transaction
+            transaction = current_transaction()
+            if transaction is None:
+                animation.nla_tracks.remove(track)
+            else:
+                transaction.pending_empty_tracks.append((owner, track))
     return retired
 
 
@@ -135,6 +145,11 @@ def remove_unused_replaced_actions(actions):
     Defer deletion until the batch succeeds so a failed import retains recovery
     data. do_unlink=False is a final safeguard against affecting another user.
     """
+    from .import_transaction import current_transaction
+    transaction = current_transaction()
+    if transaction is not None:
+        transaction.retired_actions.update(actions)
+        return []
     removed = []
     for action in actions:
         if (action.users == 0 and not action.use_fake_user

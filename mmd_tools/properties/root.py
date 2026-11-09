@@ -4,7 +4,7 @@
 import bpy
 import mmd_tools.core.model as mmd_model
 from mmd_tools import utils
-from mmd_tools.bpyutils import SceneOp, activate_layer_collection
+from mmd_tools.bpyutils import set_objects_hidden, SceneOp, activate_layer_collection
 from mmd_tools.core.material import FnMaterial
 from mmd_tools.core.sdef import FnSDEF
 from mmd_tools.properties.morph import (BoneMorph, GroupMorph, MaterialMorph,
@@ -96,8 +96,10 @@ def _toggleUseSDEF(self, context):
 def _toggleVisibilityOfMeshes(self, context):
     root = self.id_data
     hide = not self.show_meshes
-    for i in mmd_model.Model(root).meshes():
-        i.hide = i.hide_render = hide
+    meshes = list(mmd_model.Model(root).meshes())
+    set_objects_hidden(context, meshes, hide)
+    for i in meshes:
+        i.hide_render = hide
     if hide and context.active_object is None:
         SceneOp(context).active_object = root
 
@@ -115,8 +117,7 @@ def _show_meshes_set(prop, v):
 def _toggleVisibilityOfRigidBodies(self, context):
     root = self.id_data
     hide = not self.show_rigid_bodies
-    for i in mmd_model.Model(root).rigidBodies():
-        i.hide = hide
+    set_objects_hidden(context, mmd_model.Model(root).rigidBodies(), hide)
     if hide and context.active_object is None:
         SceneOp(context).active_object = root
 
@@ -124,8 +125,7 @@ def _toggleVisibilityOfRigidBodies(self, context):
 def _toggleVisibilityOfJoints(self, context):
     root = self.id_data
     hide = not self.show_joints
-    for i in mmd_model.Model(root).joints():
-        i.hide = hide
+    set_objects_hidden(context, mmd_model.Model(root).joints(), hide)
     if hide and context.active_object is None:
         SceneOp(context).active_object = root
 
@@ -134,8 +134,7 @@ def _toggleVisibilityOfTemporaryObjects(self, context):
     root = self.id_data
     hide = not self.show_temporary_objects
     with activate_layer_collection(root):
-        for i in mmd_model.Model(root).temporaryObjects():
-            i.hide = hide
+        set_objects_hidden(context, mmd_model.Model(root).temporaryObjects(), hide)
     if hide and context.active_object is None:
         SceneOp(context).active_object = root
 

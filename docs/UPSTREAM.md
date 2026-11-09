@@ -1,6 +1,6 @@
 # 来源、移植范围与实现对应
 
-比较基线为原版 MMD Tools 2.10.3。高版本移植的代码参考固定在 **v4.5.14**，不是声称与未来的 main 分支始终一致。以下链接用于追溯功能来源；3.6 适配后的内部实现可能不同。
+比较基线为原版 MMD Tools 2.10.3。原有高版本移植功能参考 **v4.5.14**；3.0.2 增补以下固定提交，不是声称与未来的 main 分支始终一致。以下链接用于追溯功能来源；3.6 适配后的内部实现可能不同。
 
 ## 高版本移植及参考
 
@@ -33,3 +33,17 @@
 ## 保留的原版功能
 
 模型、动作与姿态基础读写、材质着色、物理模拟、表情绑定、NLA 支持等仍以 2.10.3 为基础。没有移植整个 4.5.14 插件，也没有将高版本所有已修复问题一次性带入 3.6。未列出的上游后续功能不能据此视为已支持。
+
+## 3.0.2 的补充移植与适配
+
+| 功能 | GitHub 依据 | 适配说明 |
+| --- | --- | --- |
+| 物理异常后恢复世界启用状态 | [上游提交 e321bd0](https://github.com/MMD-Blender/blender_mmd_tools/commit/e321bd02dd0288a3dc9f1974c06597803c060e11) | 构建和清理使用 finally 恢复原状态 |
+| 在刚体缓存起始帧构建 | [PR #343](https://github.com/MMD-Blender/blender_mmd_tools/pull/343)、[提交 b51ad20](https://github.com/MMD-Blender/blender_mmd_tools/commit/b51ad20557e9a55eb566af6efa598d8491382db8) | 保留并恢复原当前帧及子帧 |
+| 物理构建和清理提速 | [PR #342](https://github.com/MMD-Blender/blender_mmd_tools/pull/342)、[批量处理提交](https://github.com/MMD-Blender/blender_mmd_tools/commit/851bdf91b712171225224fd377b12afe690152ab)、[批量显隐](https://github.com/MMD-Blender/blender_mmd_tools/commit/cfbad16b6cbe647c7153c5b8137ed8120816be51)、[更新标记修正](https://github.com/MMD-Blender/blender_mmd_tools/commit/084168a6467c70881842902197829e71d7553a66)、[先清临时数据](https://github.com/MMD-Blender/blender_mmd_tools/commit/27000a5438e234d8397797aa43f394f0bd8bd1ed)、[删除前解除物理引用](https://github.com/MMD-Blender/blender_mmd_tools/commit/1b2d0cc5d2ce94c79d3dd8cb07b86bcdee6ba8fb) | 保留旧版层级筛选规则；3.6 先调用刚体约束释放，再批量删除，避免使用依赖新内核的 fake-user 删除捷径；界面显隐保护无关对象状态 |
+| PMX 打包贴图导出 | [提交 d2f2690](https://github.com/MMD-Blender/blender_mmd_tools/commit/d2f2690146a9254a8580909debd11bbe2898e367) | 保存实际图像引用，写出打包字节；保留 2.10.3 的材质与路径体系，区分同路径不同 Image |
+| PMX 读取校验 | [提交 e1ceb3e](https://github.com/MMD-Blender/blender_mmd_tools/commit/e1ceb3e5944acdb3aecc97ff40f54737853ae215) | 检查负数长度/数量及读取不足；缓存文件长度，避免每次读取查询文件大小 |
+
+VMD 导入失败恢复（`core/vmd/import_transaction.py`）及当前场景/NLA 结束帧计算（`auto_scene_setup.py`）为本版实现。前者推迟旧动画删除，整批失败时恢复；后者排除其他场景、静音/未启用条带和未使用动作，保持用户指定的帧率与起始帧规则。
+
+本版另外为 Blender 3.6 增加旧关节内部物理引用刷新：只重新建立原关节的物理组件，保留对象、参数、动作/驱动及物理世界中的对象顺序，处理旧工程构建或清理后的失效引用。该兼容处理为本版补充。

@@ -3,6 +3,184 @@
 from typing import Optional, Union
 import bpy
 
+
+def remove_rigid_body_constraints(context, objects, defer_update=False):
+    """Release Bullet references before freeing temporary objects on 3.6.
+
+    This is the same native operator called by bpy.ops. The 3.6 Python wrapper
+    evaluates the entire view layer before AND after every call; do that once
+    for this strictly local batch instead. No global wrapper is patched. Other
+    versions/builds fall back to ordinary operators.
+    """
+    if not objects:
+        return
+    native_call = None
+    if bpy.app.version[:2] == (3, 6):
+        try:
+            from _bpy import ops as native_ops
+            native_call = native_ops.call
+        except (ImportError, AttributeError):
+            pass
+    active = context.view_layer.objects.active
+    context.view_layer.update()
+    try:
+        for obj in objects:
+            context.view_layer.objects.active = obj
+            with context.temp_override(object=obj, active_object=obj):
+                if native_call is None:
+                    result = bpy.ops.rigidbody.constraint_remove()
+                else:
+                    result = native_call('rigidbody.constraint_remove', None, {})
+                if 'FINISHED' not in result or obj.rigid_body_constraint:
+                    raise RuntimeError('Could not release rigid body constraint: ' + obj.name)
+    finally:
+        context.view_layer.objects.active = active
+        if not defer_update:
+            context.view_layer.update()
+
+
+def refresh_rigid_body_constraints(context, objects):
+    """Recreate only native joint components; keep objects, settings and curves.
+
+    Some old 3.6 projects retain stale Bullet references when existing joints
+    change collision suppression during a build. Refresh before re-enabling
+    the world, with the final parameter values and original ID references.
+    """
+    world = context.scene.rigidbody_world
+    collection = world.constraints if world else None
+    original_order = list(collection.objects) if collection else []
+    targets = set(objects)
+    ordered = [obj for obj in original_order if obj in targets]
+    ordered.extend(obj for obj in objects if obj not in set(original_order))
+    saved = []
+    for obj in ordered:
+        constraint = obj.rigid_body_constraint
+        if constraint is None:
+            continue
+        values = {}
+        for prop in constraint.bl_rna.properties:
+            if prop.is_readonly or prop.type == 'COLLECTION':
+                continue
+            value = getattr(constraint, prop.identifier)
+            values[prop.identifier] = tuple(value) if getattr(prop, 'is_array', False) else value
+        saved.append((obj, values))
+    if not saved:
+        return
+    native_call = None
+    if bpy.app.version[:2] == (3, 6):
+        try:
+            from _bpy import ops as native_ops
+            native_call = native_ops.call
+        except (ImportError, AttributeError):
+            pass
+    active = context.view_layer.objects.active
+    remove_rigid_body_constraints(context, [obj for obj, _ in saved], defer_update=True)
+    try:
+        for obj, values in saved:
+            context.view_layer.objects.active = obj
+            with context.temp_override(object=obj, active_object=obj):
+                if native_call is None:
+                    result = bpy.ops.rigidbody.constraint_add(type=values['type'])
+                else:
+                    result = native_call('rigidbody.constraint_add', None, {'type': values['type']})
+                if 'FINISHED' not in result:
+                    raise RuntimeError('Could not restore rigid body constraint: ' + obj.name)
+            for name, value in values.items():
+                if name != 'type':
+                    setattr(obj.rigid_body_constraint, name, value)
+    finally:
+        # Constraint ordering affects Bullet's iterative solver. Keep the
+        # original world collection identity and order, including other models.
+        if collection and list(collection.objects) != original_order:
+            first = next((i for i, obj in enumerate(original_order) if obj in targets), len(original_order))
+            tail = original_order[first:]
+            for obj in tail:
+                if obj.name in collection.objects:
+                    collection.objects.unlink(obj)
+            for obj in tail:
+                if obj.rigid_body_constraint:
+                    collection.objects.link(obj)
+        context.view_layer.objects.active = active
+        context.view_layer.update()
+
+
+def copy_objects(template, count, copy_data=False):
+    """Upstream bulk copy adapted to 3.6; avoid viewport selection operators."""
+    physics_collections = {c for s in bpy.data.scenes if s.rigidbody_world
+                           for c in (s.rigidbody_world.collection, s.rigidbody_world.constraints) if c}
+    collections = [c for c in template.users_collection if c not in physics_collections]
+    result = [template]
+    for _ in range(count - 1):
+        obj = template.copy()
+        if copy_data and obj.data:
+            obj.data = obj.data.copy()
+        for collection in collections:
+            collection.objects.link(obj)
+        result.append(obj)
+    return result
+
+
+def set_hide_select(objects, hidden=True):
+    objects = [o for o in objects if o.library is None or o.override_library]
+    if not objects:
+        return
+    targets = set(objects)
+    values = [False] * len(bpy.data.objects)
+    bpy.data.objects.foreach_get('hide_select', values)
+    for i, obj in enumerate(bpy.data.objects):
+        if obj in targets:
+            values[i] = hidden
+    bpy.data.objects.foreach_set('hide_select', values)
+    for obj in objects:
+        obj.update_tag()
+    bpy.context.view_layer.update()
+
+
+def set_objects_hidden(context, objects, hidden):
+    """Batch viewport visibility, preserving unrelated hidden/selected objects."""
+    layer_objects = set(context.view_layer.objects)
+    objects = [o for o in objects if o in layer_objects and o.hide_get() != hidden]
+    if not objects:
+        return
+    window = context.window
+    area = next((a for a in window.screen.areas if a.type == 'VIEW_3D'), None) if window else None
+    if area is None or context.mode != 'OBJECT' or (not hidden and len(objects) < 64):
+        for obj in objects:
+            obj.hide_set(hidden)
+        return
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    selected = list(context.selected_objects)
+    active = context.view_layer.objects.active
+    original_hidden = {o for o in layer_objects if o.hide_get()}
+    targets = set(objects)
+    hide_targets = objects if hidden else list(original_hidden - targets)
+    locked = [o for o in hide_targets if o.hide_select]
+    try:
+        set_hide_select(locked, False)
+        with context.temp_override(window=window, area=area, region=region):
+            if not hidden:
+                bpy.ops.object.hide_view_clear(select=False)
+            for obj in context.selected_objects:
+                obj.select_set(False)
+            for obj in hide_targets:
+                obj.select_set(True)
+            if hide_targets:
+                bpy.ops.object.hide_view_set(unselected=False)
+        for obj in hide_targets:
+            if not obj.hide_get():
+                obj.hide_set(True)
+        for obj in objects:
+            if obj.hide_get() != hidden:
+                obj.hide_set(hidden)
+    finally:
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        for obj in selected:
+            if obj.visible_get():
+                obj.select_set(True)
+        context.view_layer.objects.active = active
+        set_hide_select(locked, True)
+
 matmul = (lambda a, b: a*b) if bpy.app.version < (2, 80, 0) else (lambda a, b: a.__matmul__(b))
 
 class Props: # For API changes of only name changed properties

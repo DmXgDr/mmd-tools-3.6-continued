@@ -145,22 +145,22 @@ class FnModel:
 
     @staticmethod
     def all_children(obj: bpy.types.Object) -> Iterator[bpy.types.Object]:
-        child: bpy.types.Object
-        obj.children_recursive
-        for child in obj.children:
-            yield child
-            yield from FnModel.all_children(child)
+        if obj is not None:
+            yield from obj.children_recursive
 
     @staticmethod
     def filtered_children(condition_function: Callable[[bpy.types.Object], bool], obj: Optional[bpy.types.Object]) -> Iterator[bpy.types.Object]:
         if obj is None:
             return
-        child: bpy.types.Object
-        for child in obj.children:
+        # Preserve 2.10.3 pruning at a matching node, with one hierarchy scan.
+        skipped = set()
+        for child in obj.children_recursive:
+            if child.parent in skipped:
+                skipped.add(child)
+                continue
             if condition_function(child):
                 yield child
-            else:
-                yield from FnModel.filtered_children(condition_function, child)
+                skipped.add(child)
 
     @staticmethod
     def child_meshes(obj: bpy.types.Object) -> Iterator[bpy.types.Object]:
@@ -241,17 +241,17 @@ class FnModel:
         def _change_bone_id(bone: bpy.types.PoseBone, new_bone_id: int, bone_morphs, pose_bones):
             """This function will also update the references of bone morphs and rotate+/move+."""
             bone_id = bone.mmd_bone.bone_id
-            
+
             # Change Bone ID
             bone.mmd_bone.bone_id = new_bone_id
-            
+
             # Update Relative Bone Morph # Update the reference of bone morph # 更新骨骼表情
             for bone_morph in bone_morphs:
                 for data in bone_morph.data:
                     if data.bone_id != bone_id:
                         continue
                     data.bone_id = new_bone_id
-            
+
             # Update Relative Additional Transform # Update the reference of rotate+/move+ # 更新付与親
             for pose_bone in pose_bones:
                 if pose_bone.is_mmd_shadow_bone:
@@ -260,7 +260,7 @@ class FnModel:
                 if mmd_bone.additional_transform_bone_id != bone_id:
                     continue
                 mmd_bone.additional_transform_bone_id = new_bone_id
-        
+
         max_bone_id = max(
             (
                 b.mmd_bone.bone_id
@@ -273,7 +273,7 @@ class FnModel:
             ),
             default=-1,
         )
-        
+
         child_root_object: bpy.types.Object
         for child_root_object in child_root_objects:
             child_armature_object = FnModel.find_armature(child_root_object)
@@ -966,96 +966,111 @@ class Model:
 
     def build(self, non_collision_distance_scale = 1.5, collision_margin = 1e-06):
         rigidbody_world_enabled = rigid_body.setRigidBodyWorldEnabled(False)
-        if self.__root.mmd_root.is_built:
-            self.clean()
-        self.__root.mmd_root.is_built = True
-        logging.info('****************************************')
-        logging.info(' Build rig')
-        logging.info('****************************************')
-        start_time = time.time()
-        self.__preBuild()
-        self.disconnectPhysicsBones()
-        self.buildRigids(non_collision_distance_scale, collision_margin)
-        self.buildJoints()
-        self.__postBuild()
-        logging.info(' Finished building in %f seconds.', time.time() - start_time)
-        rigid_body.setRigidBodyWorldEnabled(rigidbody_world_enabled)
+        scene = bpy.context.scene
+        frame, subframe = scene.frame_current, scene.frame_subframe
+        point_cache = scene.rigidbody_world.point_cache if scene.rigidbody_world else None
+        start_frame = point_cache.frame_start if point_cache else scene.frame_start
+        try:
+            scene.frame_set(start_frame)
+            if self.__root.mmd_root.is_built:
+                self.clean()
+            self.__root.mmd_root.is_built = True
+            logging.info('****************************************')
+            logging.info(' Build rig')
+            logging.info('****************************************')
+            start_time = time.time()
+            self.__preBuild()
+            self.disconnectPhysicsBones()
+            self.buildRigids(non_collision_distance_scale, collision_margin)
+            self.buildJoints()
+            self.__postBuild()
+            logging.info(' Finished building in %f seconds.', time.time() - start_time)
+        finally:
+            try:
+                scene.frame_set(frame, subframe=subframe)
+            finally:
+                rigid_body.setRigidBodyWorldEnabled(rigidbody_world_enabled)
 
     def clean(self):
         rigidbody_world_enabled = rigid_body.setRigidBodyWorldEnabled(False)
-        logging.info('****************************************')
-        logging.info(' Clean rig')
-        logging.info('****************************************')
-        start_time = time.time()
+        try:
+            self.__removeTemporaryObjects()
+            logging.info('****************************************')
+            logging.info(' Clean rig')
+            logging.info('****************************************')
+            start_time = time.time()
 
-        pose_bones = []
-        arm = self.armature()
-        if arm is not None:
-            pose_bones = arm.pose.bones
-        for i in pose_bones:
-            if 'mmd_tools_rigid_track' in i.constraints:
-                const = i.constraints['mmd_tools_rigid_track']
-                i.constraints.remove(const)
+            pose_bones = []
+            arm = self.armature()
+            if arm is not None:
+                pose_bones = arm.pose.bones
+            for i in pose_bones:
+                if 'mmd_tools_rigid_track' in i.constraints:
+                    const = i.constraints['mmd_tools_rigid_track']
+                    i.constraints.remove(const)
 
-        rigid_track_counts = 0
-        for i in self.rigidBodies():
-            rigid_type = int(i.mmd_rigid.type)
-            if 'mmd_tools_rigid_parent' not in i.constraints:
-                rigid_track_counts += 1
-                logging.info('%3d# Create a "CHILD_OF" constraint for %s', rigid_track_counts, i.name)
-                i.mmd_rigid.bone = i.mmd_rigid.bone
-            relation = i.constraints['mmd_tools_rigid_parent']
-            relation.mute = True
-            if rigid_type == rigid_body.MODE_STATIC:
-                i.parent_type = 'OBJECT'
-                i.parent = self.rigidGroupObject()
-            elif rigid_type in [rigid_body.MODE_DYNAMIC, rigid_body.MODE_DYNAMIC_BONE]:
-                arm = relation.target
-                bone_name = relation.subtarget
-                if arm is not None and bone_name != '':
-                    for c in arm.pose.bones[bone_name].constraints:
-                        if c.type == 'IK':
-                            c.mute = False
-            self.__restoreTransforms(i)
+            rigid_track_counts = 0
+            for i in self.rigidBodies():
+                rigid_type = int(i.mmd_rigid.type)
+                if 'mmd_tools_rigid_parent' not in i.constraints:
+                    rigid_track_counts += 1
+                    logging.info('%3d# Create a "CHILD_OF" constraint for %s', rigid_track_counts, i.name)
+                    i.mmd_rigid.bone = i.mmd_rigid.bone
+                relation = i.constraints['mmd_tools_rigid_parent']
+                relation.mute = True
+                if rigid_type == rigid_body.MODE_STATIC:
+                    i.parent_type = 'OBJECT'
+                    i.parent = self.rigidGroupObject()
+                elif rigid_type in [rigid_body.MODE_DYNAMIC, rigid_body.MODE_DYNAMIC_BONE]:
+                    arm = relation.target
+                    bone_name = relation.subtarget
+                    if arm is not None and bone_name != '':
+                        for c in arm.pose.bones[bone_name].constraints:
+                            if c.type == 'IK':
+                                c.mute = False
+                self.__restoreTransforms(i)
 
-        for i in self.joints():
-            self.__restoreTransforms(i)
+            for i in self.joints():
+                self.__restoreTransforms(i)
 
-        self.__removeTemporaryObjects()
-        self.connectPhysicsBones()
+            self.connectPhysicsBones()
 
-        arm = self.armature()
-        if arm is not None:  # update armature
-            arm.update_tag()
-            bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+            arm = self.armature()
+            if arm is not None:  # update armature
+                arm.update_tag()
+                bpy.context.scene.frame_set(bpy.context.scene.frame_current)
 
-        mmd_root = self.rootObject().mmd_root
-        if mmd_root.show_temporary_objects:
-            mmd_root.show_temporary_objects = False
-        logging.info(' Finished cleaning in %f seconds.', time.time() - start_time)
-        mmd_root.is_built = False
-        rigid_body.setRigidBodyWorldEnabled(rigidbody_world_enabled)
+            mmd_root = self.rootObject().mmd_root
+            if mmd_root.show_temporary_objects:
+                mmd_root.show_temporary_objects = False
+            logging.info(' Finished cleaning in %f seconds.', time.time() - start_time)
+            mmd_root.is_built = False
+            if bpy.app.version[:2] == (3, 6):
+                bpyutils.refresh_rigid_body_constraints(bpy.context, tuple(self.joints()))
+        finally:
+            rigid_body.setRigidBodyWorldEnabled(rigidbody_world_enabled)
 
     def __removeTemporaryObjects(self):
-        if bpy.app.version < (2, 78, 0):
-            self.__removeChildrenOfTemporaryGroupObject()  # for speeding up only
-            for i in self.temporaryObjects():
-                bpy.context.scene.objects.unlink(i)
-                bpy.data.objects.remove(i)
-        elif bpy.app.version < (2, 80, 0):
-            for i in self.temporaryObjects():
-                bpy.data.objects.remove(i, do_unlink=True)
-        elif bpy.app.version < (2, 81, 0):
-            tmp_objs = tuple(self.temporaryObjects())
-            for i in tmp_objs:
-                for c in i.users_collection:
-                    c.objects.unlink(i)
-            bpy.ops.object.delete({'selected_objects': tmp_objs, 'active_object': self.rootObject()})
-            for i in tmp_objs:
-                if i.users < 1:
-                    bpy.data.objects.remove(i)
-        else:
-            bpy.ops.object.delete({'selected_objects': tuple(self.temporaryObjects()), 'active_object': self.rootObject()})
+        objects = tuple(self.temporaryObjects())
+        # Blender 3.6's object.delete does not detach Bullet constraints from
+        # the world. Remove the physics components first, then batch-free IDs.
+        # This uses 3.6's supported operator API instead of the newer upstream
+        # fake-user/delete shortcut, which requires a newer Blender core.
+        context = bpy.context
+        active = context.view_layer.objects.active
+        try:
+            bpyutils.remove_rigid_body_constraints(context, [obj for obj in objects if obj.rigid_body_constraint])
+            bodies = [obj for obj in objects if obj.rigid_body]
+            if bodies:
+                with context.temp_override(selected_objects=bodies, selected_editable_objects=bodies):
+                    bpy.ops.rigidbody.objects_remove()
+            if objects:
+                bpy.data.batch_remove(objects)
+        finally:
+            if active not in objects:
+                context.view_layer.objects.active = active
+            else:
+                context.view_layer.objects.active = self.rootObject()
 
     def __removeChildrenOfTemporaryGroupObject(self):
         tmp_grp_obj = self.temporaryGroupObject()
@@ -1290,13 +1305,14 @@ class Model:
         rb = ncc_obj.rigid_body_constraint
         rb.disable_collisions = True
 
-        ncc_objs = bpyutils.duplicateObject(ncc_obj, total_len)
+        ncc_objs = bpyutils.copy_objects(ncc_obj, total_len)
         logging.debug(' created %d ncc.', len(ncc_objs))
 
         for ncc_obj, pair in zip(ncc_objs, nonCollisionJointTable):
             rbc = ncc_obj.rigid_body_constraint
             rbc.object1, rbc.object2 = pair
-            ncc_obj.hide = ncc_obj.hide_select = True
+        bpyutils.set_objects_hidden(bpy.context, ncc_objs, True)
+        bpyutils.set_hide_select(ncc_objs, True)
         logging.debug(' finish in %f seconds.', time.time() - start_time)
         logging.debug('-'*60)
 
@@ -1343,6 +1359,8 @@ class Model:
         for cnt, i in enumerate(rigid_objects):
             logging.info('%3d/%3d: Updating rigid body %s', cnt+1, rigid_object_cnt, i.name)
             self.updateRigid(i, collision_margin)
+        if bpy.app.version[:2] == (3, 6):
+            bpyutils.refresh_rigid_body_constraints(bpy.context, tuple(self.joints()))
         self.__createNonCollisionConstraint(nonCollisionJointTable)
         return rigid_objects
 
